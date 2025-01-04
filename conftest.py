@@ -4,11 +4,9 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
-
 """
-This is used to configure markers on tests based on filename.
-
-We use this to split up tests into different circleci runs.
+This script configures markers on tests based on filenames for CircleCI parallelization.
+It is used to split up tests into different CircleCI runs.
 """
 
 import os
@@ -19,15 +17,13 @@ import pytest
 import subprocess
 
 
-# TODO: rename the folders nicer so they make more sense, maybe even have
-# a 1:1 correspondance with the circleci name
-
-
 # -----------------------------------------------------------------------
 # From https://github.com/ryanwilsonperkin/pytest-circleci-parallelized.
 # MIT licensed, Copyright Ryan Wilson-Perkin.
 # -----------------------------------------------------------------------
+
 def get_class_name(item):
+    """Extract the class name from a pytest item."""
     class_name, module_name = None, None
     for parent in reversed(item.listchain()):
         if isinstance(parent, pytest.Class):
@@ -36,18 +32,15 @@ def get_class_name(item):
             module_name = parent.module.__name__
             break
 
-    # heuristic:
-    # - better to group gpu and task tests, since tests from those modules
-    #   are likely to share caching more
-    # - split up the rest by class name because slow tests tend to be in
-    #   the same module
+    # Heuristic: group GPU and task tests, as they are likely to share caching
     if class_name and '.tasks.' not in module_name:
-        return "{}.{}".format(module_name, class_name)
+        return f"{module_name}.{class_name}"
     else:
         return module_name
 
 
 def filter_tests_with_circleci(test_list):
+    """Split tests using CircleCI's split functionality."""
     circleci_input = "\n".join(test_list).encode("utf-8")
     p = subprocess.Popen(
         ["circleci", "tests", "split"], stdin=subprocess.PIPE, stdout=subprocess.PIPE
@@ -58,7 +51,7 @@ def filter_tests_with_circleci(test_list):
     ]
 
 
-# -----------------------------------------------------------------------
+# Define marker rules for different test categories
 MARKER_RULES = [
     ('parlai_internal', 'internal'),
     ('crowdsourcing/', 'crowdsourcing'),
@@ -70,35 +63,40 @@ MARKER_RULES = [
     ('tod/', 'tod'),
 ]
 
-
 def pytest_collection_modifyitems(config, items):
+    """
+    Modify the test items by adding appropriate markers based on filename patterns.
+    Also, handle test filtering and splitting for CircleCI parallelization.
+    """
     marker_expr = config.getoption('markexpr')
-
     deselected = []
 
-    # first add all the markers, possibly filtering
-    # python 3.4/3.5 compat: rootdir = pathlib.Path(str(config.rootdir))
     rootdir = pathlib.Path(config.rootdir)
+    
+    # Apply markers based on filename patterns
     for item in items:
         rel_path = str(pathlib.Path(item.fspath).relative_to(rootdir))
+        marker_assigned = False
         for file_pattern, marker in MARKER_RULES:
             if file_pattern in rel_path:
                 item.add_marker(marker)
+                marker_assigned = True
                 if marker_expr and marker != marker_expr:
                     deselected.append(item)
                 break
-        else:
+        
+        if not marker_assigned:
             assert "/" not in rel_path[6:], f"Couldn't categorize '{rel_path}'"
             item.add_marker("unit")
             if marker_expr not in ['', 'unit']:
                 deselected.append(item)
 
-    # kill everything that wasn't grabbed
+    # Remove deselected items
     for item in deselected:
         items.remove(item)
 
     if 'CIRCLE_NODE_TOTAL' in os.environ:
-        # circleci, split up the parallelism by classes
+        # Split tests into groups based on class name for CircleCI parallelism
         class_mapping = collections.defaultdict(list)
         for item in items:
             class_name = get_class_name(item)
@@ -111,15 +109,13 @@ def pytest_collection_modifyitems(config, items):
         new_items = []
         for name in filtered_tests:
             new_items.extend(class_mapping[name])
-            items[:] = new_items
+        items[:] = new_items
 
 
 def pytest_sessionfinish(session, exitstatus):
     """
-    Ensure that pytest doesn't report failure when no tests are collected.
-
-    This can sometimes happen due to the way we distribute tests across multiple circle
-    nodes.
+    Ensure that pytest doesn't report failure when no tests are collected, 
+    which can happen during test distribution across CircleCI nodes.
     """
     if exitstatus == pytest.ExitCode.NO_TESTS_COLLECTED:
         session.exitstatus = pytest.ExitCode.OK
